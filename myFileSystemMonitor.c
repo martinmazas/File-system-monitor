@@ -24,7 +24,7 @@
 
 #define PORT 5000 //Netcat server port
 #define BT_BUF_SIZE 1024
-#define TELNET_PORT 12345 //Telnet listening port
+#define TELNET_PORT 8000
 
 // Global variables
 char dir[100];
@@ -190,7 +190,7 @@ void *telnetBT()
     struct sockaddr_in servaddr;
     struct cli_command *c;
     struct cli_def *cli;
-    int on = 1;
+    int on = 1, x;
 
     cli = cli_init();
     cli_set_hostname(cli, "myFileSystemMonitor");
@@ -200,6 +200,27 @@ void *telnetBT()
 
     listenSkt = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(listenSkt, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    // Listen on port
+	memset(&servaddr, 0, sizeof(servaddr));
+	servaddr.sin_family = AF_INET;
+	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	servaddr.sin_port = htons(TELNET_PORT);
+	bind(listenSkt, (struct sockaddr *)&servaddr, sizeof(servaddr));
+
+	// Wait for a connection
+	listen(listenSkt, 50);
+
+	while (telnetListen && (x = accept(listenSkt, NULL, 0)))
+	{
+		// Pass the connection off to libcli
+		cli_loop(cli, x);
+		close(x);
+	}
+
+	// Free data structures
+	cli_done(cli);
+	pthread_exit(0);
 }
 
 int main(int argc, char *argv[])

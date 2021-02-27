@@ -37,9 +37,7 @@ int listenSkt;
 
 void sendToServer(char *time, char *access, char *name, FILE *fdHTML)
 {
-    int sock, nsent;
-    char sendPacket[2048];
-    memset(sendPacket, 0, sizeof(sendPacket));
+    int sock;
 
     struct sockaddr_in s = {0};
     s.sin_family = AF_INET;
@@ -58,27 +56,13 @@ void sendToServer(char *time, char *access, char *name, FILE *fdHTML)
         exit(1);
     }
 
-    fprintf(fdHTML, "<h3>FILE ACCESSED: %s</h3>\n",name);
-    fprintf(fdHTML, "<h3>ACCESS: %s</h3>\n",access);
-    fprintf(fdHTML, "<h3>TIME OF ACCESS: %s</h3>\n",time);
-    // strcpy(sendPacket, "\nFILE ACCESSED: ");
-    // strcat(sendPacket, name);
-    // fprintf(fdHTML, sendPacket);
-    // strcat(sendPacket, "\nACCESS: ");
-    // strcat(sendPacket, access);
-    // fprintf(fdHTML, sendPacket);
-    // strcat(sendPacket, "\nTIME OF ACCESS: ");
-    // strcat(sendPacket, time);
-    // fprintf(fdHTML, sendPacket);
-    // strcat(sendPacket, "\n");
-    // strcat(sendPacket, "\0");
-
-
-    if ((nsent = send(sock, sendPacket, strlen(sendPacket), 0)) < 0)
+    const char* emptyString = "";
+    if((strcmp(name,emptyString) != 0) && (strcmp(access, emptyString)!=0) && (strcmp(time,emptyString)!=0))
     {
-        perror("recv");
-        exit(1);
-    }
+        fprintf(fdHTML, "<h3>FILE ACCESSED: %s</h3>\n", name);
+        fprintf(fdHTML, "<h3>ACCESS: %s</h3>\n", access);
+        fprintf(fdHTML, "<h3>TIME OF ACCESS: %s</h3>\n", time);
+    }    
 
     close(sock);
     exit(0);
@@ -91,11 +75,12 @@ static void handle_events(int fd, int wd, FILE *fdHTML)
     ssize_t len;
     char *ptr;
     pid_t newProcess;
-    char timeBuffer[32];
+    char timeBuffer[50];
     char operationBuffer[16];
     char nameBuffer[1024];
 
     // Loop while events can be read from inotify file descriptor
+
     for (;;)
     {
         //Read some events
@@ -124,19 +109,12 @@ static void handle_events(int fd, int wd, FILE *fdHTML)
                 currTime = time(NULL);
                 timeInfo = localtime(&currTime);
                 strftime(timeBuffer, 32, "%d-%B-%Y at %H:%M:%S", timeInfo);
-                // fprintf(fdHTML, timeBuffer);
-                // write(fdHTML, timeBuffer, strlen(timeBuffer));
-                // fprintf(fdHTML, " -> ");
-                // write(fdHTML, " -> ", strlen(" -> "));
 
                 if (event->mask & IN_CLOSE_WRITE)
                     strcpy(operationBuffer, "WRITE");
                 if (event->mask & IN_CLOSE_NOWRITE)
                     strcpy(operationBuffer, "READ");
             }
-
-            // fprintf(fdHTML, operationBuffer);
-            // write(fdHTML, operationBuffer, strlen(operationBuffer));
 
             //Name of watched directory
             if (wd == event->wd)
@@ -145,32 +123,15 @@ static void handle_events(int fd, int wd, FILE *fdHTML)
             //File name
             if (event->len)
             {
-                // char *fileAccess; 
-                // char *fileName;
-                // fileAccess = "FILE ACCESSED: ";
-                // fileName  = event->name;
-                // char *accessToPrint = (char *)malloc(1 + strlen(fileAccess) + strlen(fileName));
-                // strcpy(accessToPrint, fileAccess);
-                // strcat(accessToPrint, accessToPrint);
-                // fprintf(fdHTML, event->name);
-                // write(fdHTML, event->name, strlen(event->name));
                 strcat(nameBuffer, event->name);
             }
-
-            //Type of filesystem object
-            // if (event->mask & IN_ISDIR)
-            //     fprintf(fdHTML, " [dir]<br>");
-            // write(fdHTML, " [dir]<br>", strlen(" [dir]<br>"));
-            // else
-            //     fprintf(fdHTML, " [file]<br>");
-            // write(fdHTML, " [file]<br>", strlen(" [file]<br>"));
 
             newProcess = fork();
             if (newProcess == -1)
                 perror("Fork error");
 
             if (newProcess == 0)
-                sendToServer(timeBuffer, operationBuffer, nameBuffer, fdHTML);
+                sendToServer(timeBuffer, operationBuffer, nameBuffer, fdHTML); 
         }
     }
 }
@@ -181,16 +142,6 @@ int cmd_backtrace(struct cli_def *cli, char *command, char *argv[], int argc)
     sem_wait(&semaphore);
     cli_print(cli, "%s", telnetBuffer);
     return CLI_OK;
-}
-
-void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void *this_fn, void *call_site)
-{
-    if (backTraceCmd)
-    {
-        backTraceCmd = 0;
-        BackTrace();
-        sem_post(&semaphore);
-    }
 }
 
 void BackTrace()
@@ -222,6 +173,16 @@ void BackTrace()
     }
 
     free(strings);
+}
+
+void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void *this_fn, void *call_site)
+{
+    if (backTraceCmd)
+    {
+        backTraceCmd = 0;
+        BackTrace();
+        sem_post(&semaphore);
+    }
 }
 
 void *telnetBT()
@@ -282,11 +243,6 @@ int main(int argc, char *argv[])
     }
     FILE *fdHTML = fopen("/var/www/html/index.html", "w");
     fprintf(fdHTML, "<head><title>My File System Monitor</title></head>");
-    fprintf(fdHTML, "<h1 style='color:red;'>Welcome to directory watcher</h1>");
-    // if(fdHTML = open("/var/www/html/index.html", O_WRONLY | O_TRUNC) == -1)
-    // {
-    //     perror("Open html");
-    // }
 
     if (argc < 3)
     {
@@ -322,10 +278,6 @@ int main(int argc, char *argv[])
     fds[1].fd = fd;
     fds[1].events = POLLIN;
 
-    // Wait for events and/or terminal input
-
-    // char *htmlHead = "<!DOCTYPE html><html><title>File Access Monitor</title><body>";
-    // write(fdHTML, htmlHead, strlen(htmlHead));
     printf("Listening for events\n");
 
     while (1)
@@ -356,12 +308,11 @@ int main(int argc, char *argv[])
         }
     }
 
-    printf("Events listenint stopped");
+    printf("Events listening stopped");
 
     telnetListen = 0;
     close(listenSkt);
-    // write(fdHTML, "</html></body>", strlen("</html></body>"));
-    close(fdHTML);
+    fclose(fdHTML);
     close(fd);
     exit(EXIT_SUCCESS);
 }

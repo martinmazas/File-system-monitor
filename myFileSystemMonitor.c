@@ -26,22 +26,39 @@
 #define BT_BUF_SIZE 1024
 #define TELNET_PORT 8000
 
+#ifdef __GNUC__
+#define UNUSED(d) d __attribute__((unused))
+#else
+#define UNUSED(d) d
+#endif
+
+typedef struct backtrace {
+    char **trace;
+    int trace_count;
+    char is_active;
+} backtrace_s;
+
 // Global variables
 char dir[100];
 char ip[32];
 char telnetBuffer[1024];
 int telnetListen = 1;
-int backTraceCmd = 0;
 sem_t semaphore;
 int listenSkt;
+backtrace_s* bt_p;
+backtrace_s bt;
+pthread_t thread_telnet;
+void *backtrace_buffer[128];
 
+// Send a message to netcat server when there is a notify
 void sendToServer(char *time, char *access, char *name, FILE *fdHTML)
 {
-    int sock;
-
+    int sock, nsent;
+	char toSend[2048];
     struct sockaddr_in s = {0};
     s.sin_family = AF_INET;
     s.sin_port = htons(PORT);
+    memset(toSend, 0, sizeof(toSend));
 
     if (inet_pton(AF_INET, ip, &s.sin_addr.s_addr) <= 0)
     {
@@ -56,18 +73,26 @@ void sendToServer(char *time, char *access, char *name, FILE *fdHTML)
         exit(1);
     }
 
-    const char* emptyString = "";
-    if((strcmp(name,emptyString) != 0) && (strcmp(access, emptyString)!=0) && (strcmp(time,emptyString)!=0))
-    {
-        fprintf(fdHTML, "<h3>FILE ACCESSED: %s</h3>\n", name);
-        fprintf(fdHTML, "<h3>ACCESS: %s</h3>\n", access);
-        fprintf(fdHTML, "<h3>TIME OF ACCESS: %s</h3>\n", time);
-    }    
+    strcpy(toSend, "\nFILE ACCESSED: ");
+	strcat(toSend, name);	
+	strcat(toSend, "\nACCESS: ");
+	strcat(toSend, access);
+	strcat(toSend, "\nTIME OF ACCESS: ");
+	strcat(toSend, time);
+	strcat(toSend, "\n");
+	strcat(toSend, "\0");
+	
+	if((nsent = send(sock, toSend, strlen(toSend), 0)) < 0)
+	{
+		perror("recv");
+		exit(1);
+	}
 
     close(sock);
     exit(0);
 }
 
+// Send notify to apache html page and calls to sendServer function
 static void handle_events(int fd, int wd, FILE *fdHTML)
 {
     char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
@@ -131,16 +156,34 @@ static void handle_events(int fd, int wd, FILE *fdHTML)
                 perror("Fork error");
 
             if (newProcess == 0)
-                sendToServer(timeBuffer, operationBuffer, nameBuffer, fdHTML); 
+            {
+                const char *emptyString = "";
+                if ((strcmp(nameBuffer, emptyString) != 0) && (strcmp(operationBuffer, emptyString) != 0) && (strcmp(timeBuffer, emptyString) != 0))
+                {
+
+                    fprintf(fdHTML, "<h3>FILE ACCESSED: %s</h3>\n", nameBuffer);
+                    fprintf(fdHTML, "<h3>ACCESS: %s</h3>\n", operationBuffer);
+                    fprintf(fdHTML, "<h3>TIME OF ACCESS: %s</h3>\n", timeBuffer);
+                    sendToServer(timeBuffer, operationBuffer, nameBuffer, fdHTML);
+                }
+            }
         }
     }
 }
 
-int cmd_backtrace(struct cli_def *cli, char *command, char *argv[], int argc)
+int cmd_backtrace(struct cli_def *cli, UNUSED(const char *command), UNUSED(char *argv[]), UNUSED(int argc)) 
 {
-    backTraceCmd = 1;
-    sem_wait(&semaphore);
-    cli_print(cli, "%s", telnetBuffer);
+    //Initialize backtrace collection
+    bt_p->is_active = 1;
+    cli_print(cli, "backtrace() returned %d addresses\n", bt_p->trace_count);
+    //Prints all backtrace
+    for (int j = 0; j < bt_p->trace_count; j++) {
+        cli_print(cli, "%s\n", bt_p->trace[j]);
+    }
+
+    //Turns off semaphore
+    sem_post(&semaphore);
+
     return CLI_OK;
 }
 
@@ -155,7 +198,7 @@ void BackTrace()
     memset(telnetBuffer, 0, sizeof(telnetBuffer));
 
     nptrs = backtrace(buffer, BT_BUF_SIZE);
-    printf("backtrace() returned %d addresses\n", nptrs);
+    printf("BackTrace() returned %d addresses\n", nptrs);
 
     strings = backtrace_symbols(buffer, nptrs);
     if (strings == NULL)
@@ -175,14 +218,44 @@ void BackTrace()
     free(strings);
 }
 
-void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void *this_fn, void *call_site)
-{
-    if (backTraceCmd)
-    {
-        backTraceCmd = 0;
-        BackTrace();
-        sem_post(&semaphore);
+//Sets them as no-instrument-funcions as they are called inside instrument function
+//Otherwise core dumps
+void  __attribute__ ((no_instrument_function)) reset_backtrace () {
+    free(bt.trace);
+    bt.trace = (char**)malloc(0*sizeof(char*));
+    bt.trace_count = 0;
+    bt.is_active = 0;
+}
+
+//Sets them as no-instrument-funcions as they are called inside instrument function
+//Otherwise core dumps
+
+void  __attribute__ ((no_instrument_function)) collect_backtrace  (int trace_count, char** string) {
+    bt.trace = (char**)realloc(bt.trace, (bt.trace_count + trace_count) * sizeof(char*));
+    for (int h = 0; h < trace_count; h++) {
+        bt.trace[bt.trace_count + h] = (char*)malloc(128*sizeof(char));
+        strcpy(bt.trace[bt.trace_count + h], string[h]);
     }
+    bt.trace_count += trace_count;
+}
+
+//Instrumentation
+void  __attribute__ ((no_instrument_function))  __cyg_profile_func_enter (void *this_fn,
+                                                                          void *call_site)
+{
+        if(bt.is_active == 1) {
+            //Waits for libcli to finish print
+            sem_wait(&semaphore);
+            reset_backtrace();
+        }
+
+
+        if (!pthread_equal(thread_telnet, pthread_self())) {
+            int trace_count = backtrace(backtrace_buffer, sizeof(telnetBuffer));
+            char** string = backtrace_symbols(backtrace_buffer, trace_count);
+            collect_backtrace(trace_count, string);
+        }
+
 }
 
 void *telnetBT()
@@ -197,30 +270,34 @@ void *telnetBT()
     cli_set_banner(cli, "Welcome to CLI program");
     cli_allow_user(cli, "user", "111111");
     cli_register_command(cli, NULL, "backtrace", cmd_backtrace, PRIVILEGE_UNPRIVILEGED, MODE_EXEC, NULL);
-
     listenSkt = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(listenSkt, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
     // Listen on port
-	memset(&servaddr, 0, sizeof(servaddr));
-	servaddr.sin_family = AF_INET;
-	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	servaddr.sin_port = htons(TELNET_PORT);
-	bind(listenSkt, (struct sockaddr *)&servaddr, sizeof(servaddr));
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    servaddr.sin_port = htons(TELNET_PORT);
+    if (bind(listenSkt, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        perror("bind");
+        exit(0);
+    }
 
-	// Wait for a connection
-	listen(listenSkt, 50);
+    if (listen(listenSkt, 50) < 0) {
+        perror("listen");
+        exit(0);
+    }
 
-	while (telnetListen && (x = accept(listenSkt, NULL, 0)))
-	{
-		// Pass the connection off to libcli
-		cli_loop(cli, x);
-		close(x);
-	}
+    while (telnetListen && (x = accept(listenSkt, NULL, 0)))
+    {
+        // Pass the connection off to libcli
+        cli_loop(cli, x);
+        close(x);
+    }
 
-	// Free data structures
-	cli_done(cli);
-	pthread_exit(0);
+    // Free data structures
+    cli_done(cli);
+    pthread_exit(0);
 }
 
 int main(int argc, char *argv[])
@@ -230,6 +307,7 @@ int main(int argc, char *argv[])
     struct pollfd fds[2];
     char buffer;
 
+    bt_p = ((void *)&bt);
     sem_init(&semaphore, 0, 0);
 
     if (argc != 5)
@@ -262,8 +340,6 @@ int main(int argc, char *argv[])
             break;
         }
     }
-    FILE *fdHTML = fopen("/var/www/html/index.html", "w");
-    fprintf(fdHTML, "<head><title>My File System Monitor</title></head>");
 
     if (argc < 3)
     {
@@ -300,6 +376,8 @@ int main(int argc, char *argv[])
     fds[1].events = POLLIN;
 
     printf("Listening for events\n");
+    FILE *fdHTML = fopen("/var/www/html/index.html", "w");
+    fprintf(fdHTML, "<head><title>My File System Monitor</title></head>");
 
     while (1)
     {
